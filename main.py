@@ -7,17 +7,15 @@ import firebase_admin
 from firebase_admin import credentials, firestore, messaging
 import trafilatura
 from geopy.geocoders import Nominatim
+import time
 
 # --- ORTAM DEĞİŞKENLERİNDEN ALINACAK ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-
-# Firebase Key'i GitHub Secret'tan JSON string olarak alıp dosyaya çevireceğiz
 firebase_creds_json = os.environ.get("FIREBASE_CREDENTIALS")
 
 if not firebase_creds_json:
     raise Exception("Firebase Credentials bulunamadı!")
 
-# JSON stringi dict'e çevir
 cred_dict = json.loads(firebase_creds_json)
 cred = credentials.Certificate(cred_dict)
 
@@ -38,24 +36,10 @@ DEFAULT_LOCATIONS = {
 
 CATEGORY_FEEDS = {
     "Gundem": {
-        "Global": [
-            "http://feeds.bbci.co.uk/news/world/rss.xml",
-            "https://www.aljazeera.com/xml/rss/all.xml", 
-            "https://rss.nytimes.com/services/xml/rss/nyt/World.xml"
-        ],
-        "Turkey": [
-            "https://www.trthaber.com/sondakika.rss",
-            "https://www.haberturk.com/rss/manset.xml",
-            "https://www.ntv.com.tr/son-dakika.rss"
-        ],
-        "Germany": [
-            "https://www.tagesschau.de/xml/rss2/",
-            "https://www.spiegel.de/schlagzeilen/index.rss"
-        ],
-        "USA": [
-            "http://rss.cnn.com/rss/cnn_topstories.rss",
-            "https://feeds.npr.org/1001/rss.xml"
-        ]
+        "Global": ["http://feeds.bbci.co.uk/news/world/rss.xml", "https://www.aljazeera.com/xml/rss/all.xml", "https://rss.nytimes.com/services/xml/rss/nyt/World.xml"],
+        "Turkey": ["https://www.trthaber.com/sondakika.rss", "https://www.haberturk.com/rss/manset.xml", "https://www.ntv.com.tr/son-dakika.rss"],
+        "Germany": ["https://www.tagesschau.de/xml/rss2/", "https://www.spiegel.de/schlagzeilen/index.rss"],
+        "USA": ["http://rss.cnn.com/rss/cnn_topstories.rss", "https://feeds.npr.org/1001/rss.xml"]
     },
     "Futbol": {
         "Global": ["http://feeds.bbci.co.uk/sport/football/rss.xml"],
@@ -77,7 +61,6 @@ CATEGORY_FEEDS = {
     }
 }
 
-
 def get_full_news_content(url):
     try:
         downloaded = trafilatura.fetch_url(url)
@@ -95,16 +78,27 @@ def get_precise_coords(location_name):
     return 0.0, 0.0
 
 def analyze_with_gemini(full_text, title, target_category, topic):
+    topic_rules = {
+        "Gundem": "Focus on MAJOR events, politics, disasters.",
+        "Futbol": "Focus strictly on Football matches, transfers.",
+        "Basketbol": "Focus strictly on Basketball matches.",
+        "Muzik": "Focus on Music, Album releases, Concerts."
+    }
+    
+    current_rule = topic_rules.get(topic, "Focus on significant news.")
+
     prompt = f"""
     Analyze this news for topic '{topic}' in region '{target_category}'.
+    Rule: {current_rule}
     
-    1. Summarize in max 3 sentences.
-    2. Extract Location.
-    3. Assign severity (1-10).
-    4. Translate to Turkish.
+    1. Create short SUMMARY (max 3 sentences) in English.
+    2. Extract Location Name.
+    3. Is significant? (true/false)
+    4. Severity (1-10).
+    5. Translate to Turkish.
     
     Title: {title}
-    Text: {full_text[:300]}
+    Text: {full_text[:500]}
     
     Respond JSON:
     {{
@@ -119,13 +113,31 @@ def analyze_with_gemini(full_text, title, target_category, topic):
     """
     try:
         response = client.models.generate_content(
-            model='gemini-2.5-flash-lite', # Flash daha hızlı ve ucuz (free tier için)
+            model='gemini-2.5-flash-lite', 
             contents=prompt,
             config={'response_mime_type': 'application/json'}
         )
-        return json.loads(response.text)
+        
+        # --- DÜZELTME BURADA YAPILDI ---
+        # Gemini bazen ```json ile sarar, temizleyelim
+        cleaned_text = response.text.strip()
+        if cleaned_text.startswith("```"):
+            cleaned_text = cleaned_text.split("\n", 1)[-1].rsplit("\n", 1)[0]
+
+        parsed_json = json.loads(cleaned_text)
+
+        # Eğer liste dönerse ([{...}]), ilk elemanı al
+        if isinstance(parsed_json, list):
+            if len(parsed_json) > 0:
+                return parsed_json[0]
+            else:
+                return None
+        
+        return parsed_json
+        # -------------------------------
+
     except Exception as e:
-        print(f"Gemini Error: {e}")
+        print(f"Gemini Hatası: {e}")
         return None
 
 def send_push_notification(title, location, crisis_id):
@@ -139,39 +151,34 @@ def send_push_notification(title, location, crisis_id):
             topic='global_alerts'
         )
         messaging.send(message)
+        print("📲 Bildirim Gönderildi.")
     except Exception as e:
-        print(f"Notification Error: {e}")
+        print(f"Bildirim Hatası: {e}")
 
 def main():
     print("🚀 GitHub Actions - Crisis Monitor Başlatılıyor...")
     
-    # Firestore'dan son işlenen linkleri çekebilirdik ama maliyet artmasın diye
-    # şimdilik sadece RSS'in en tepesindeki 1 habere bakacağız.
-    
     for topic, countries in CATEGORY_FEEDS.items():
+        print(f"\n📂 {topic.upper()} Taranıyor...")
         for target_country, urls in countries.items():
             for url in urls:
                 try:
                     feed = feedparser.parse(url)
-                    # Sadece EN YENİ 2 haberi kontrol et (API kotasını korumak için)
-                    for entry in feed.entries[:2]:
-                        # ID oluştur
+                    # Sadece en yeni 1 habere bak (API kotasını ve süreyi korumak için)
+                    for entry in feed.entries[:1]:
                         doc_id = hashlib.md5((topic + entry.link).encode('utf-8')).hexdigest()
                         
-                        # ÖNCE DATABASE'E BAK: Bu haber zaten var mı?
-                        # Bu okuma işlemi yapar ama Gemini API kotalarını korur.
                         doc_ref = db.collection("crises").document(doc_id)
-                        doc = doc_ref.get()
-                        
-                        if doc.exists:
+                        if doc_ref.get().exists:
                             print(f"♻️ Zaten var: {entry.title[:30]}")
-                            continue # Haber varsa geç
+                            continue 
                         
-                        # Haber yoksa işle
-                        print(f"🔥 Yeni Haber: {entry.title[:30]}")
+                        print(f"🔥 İşleniyor: {entry.title[:30]}")
                         full_text = get_full_news_content(entry.link)
                         
                         if full_text:
+                            # Gemini'yi yavaşlatmamak için kısa bir bekleme (Opsiyonel)
+                            time.sleep(1) 
                             res = analyze_with_gemini(full_text, entry.title, target_country, topic)
                             
                             if res and res.get('is_relevant'):
@@ -202,12 +209,12 @@ def main():
                                 doc_ref.set(doc_data)
                                 print("✅ Veritabanına Yazıldı.")
                                 
-                                if topic == "Gundem" and target_country == "Global":
+                                # Sadece önemli global haberlerde bildirim at
+                                if topic == "Gundem" and target_country == "Global" and res.get('severity', 0) >= 7:
                                     send_push_notification(res.get('title_tr'), loc_name, doc_id)
 
                 except Exception as e:
                     print(f"RSS Hatası ({url}): {e}")
 
 if __name__ == "__main__":
-
     main()
