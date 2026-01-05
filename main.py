@@ -60,7 +60,7 @@ CATEGORY_FEEDS = {
         ]
     },
     "Futbol": {
-        "Global": ["http://feeds.bbci.co.uk/sport/football/rss.xml"],
+        "Global": ["https://www.espn.com/espn/rss/soccer/news"],
         "Turkey": [
             "https://www.ntvspor.net/rss/kategori/futbol"           # Güncel
         ],
@@ -300,3 +300,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
