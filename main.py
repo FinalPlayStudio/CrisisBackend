@@ -119,7 +119,7 @@ def analyze_with_gemini(full_text, title, target_category, topic):
     """
     try:
         response = client.models.generate_content(
-            model='gemini-2.0-flash', # Flash daha hızlı ve ucuz (free tier için)
+            model='gemini-2.5-flash-lite', # Flash daha hızlı ve ucuz (free tier için)
             contents=prompt,
             config={'response_mime_type': 'application/json'}
         )
@@ -209,4 +209,5 @@ def main():
                     print(f"RSS Hatası ({url}): {e}")
 
 if __name__ == "__main__":
+
     main()
